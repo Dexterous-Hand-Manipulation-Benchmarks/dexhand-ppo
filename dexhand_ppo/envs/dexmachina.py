@@ -26,9 +26,10 @@ _GENESIS_READY = False
 def init_genesis(device: torch.device, seed: int) -> None:
     """gs.init is process-global and may only run once (training and eval env share the process)."""
     global _GENESIS_READY
-    if _GENESIS_READY:
-        return
     import genesis as gs
+    if _GENESIS_READY or getattr(gs, "_initialized", False):  # also initialised elsewhere (e.g. a test fixture)
+        _GENESIS_READY = True
+        return
     gs.init(backend=gs.cpu if device.type == "cpu" else gs.gpu, logging_level="warning", seed=seed)
     _GENESIS_READY = True
 
@@ -220,16 +221,20 @@ class DexMachinaEvaluator:
 
     selection_metric = "eval/auc_add"
 
-    def __init__(self, cfg):
-        from dexmachina.envs.base_env import BaseEnv
+    def __init__(self, cfg, env=None):
+        """``env``: an already built eval env whose last env is the dummy (tests); otherwise built from cfg."""
+        if env is None:
+            from dexmachina.envs.base_env import BaseEnv
 
-        device = torch.device(cfg.device)
-        init_genesis(device, cfg.seed)
-        num_real = int(cfg.env.dexmachina.num_eval_envs)
-        self.argv, kwargs = build_env_kwargs(cfg, num_real + 1, eval_mode=True)  # +1: dexmachina's dummy env
-        self.env = BaseEnv(**kwargs)
+            init_genesis(torch.device(cfg.device), cfg.seed)
+            num_real = int(cfg.env.dexmachina.num_eval_envs)
+            self.argv, kwargs = build_env_kwargs(cfg, num_real + 1, eval_mode=True)  # +1: dexmachina's dummy env
+            env = BaseEnv(**kwargs)
+        else:
+            self.argv = []
+        self.env = env
         _zero_gains(self.env)
-        self.num_real = num_real
+        self.num_real = self.env.num_envs - 1
         self.max_episode_length = int(self.env.max_episode_length)
 
     @torch.no_grad()
