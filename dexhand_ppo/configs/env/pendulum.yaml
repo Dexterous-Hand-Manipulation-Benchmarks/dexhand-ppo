@@ -1,0 +1,22 @@
+# @package _global_
+# CPU sanity task: shows that the PPO core learns, independent of DexMachina. Pendulum has no terminal states;
+# episodes are truncated at 200 steps, so this also exercises truncation bootstrapping.
+env:
+  kind: gym
+  num_envs: 16
+  gym:
+    id: Pendulum-v1
+    num_eval_episodes: 10
+device: cpu
+total_steps: 400_000
+ppo:
+  num_steps: 256
+  num_minibatches: 16
+  num_epochs: 10
+  gamma: 0.95
+  learning_rate: 1e-3
+  reward_scale: 0.1
+eval:
+  interval_steps: 50_000
+checkpoint:
+  interval_steps: 200_000

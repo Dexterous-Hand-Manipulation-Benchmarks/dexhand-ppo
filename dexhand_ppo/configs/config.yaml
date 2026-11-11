@@ -1,0 +1,20 @@
+# dexhand-ppo entry config. Keys are validated against dexhand_ppo/config.py (unknown keys are errors).
+# Order matters: later entries override earlier ones. Base values (_self_) first, then the preset, then the env
+# (a task like Pendulum may override preset values, e.g. num_steps).
+defaults:
+  - schema
+  - _self_
+  - preset: default
+  - env: dexmachina
+
+seed: 0
+device: cuda
+total_steps: 50_000_000
+exp_name: ${env.kind}_${preset_name}_s${seed}
+run_dir: ${hydra:runtime.output_dir}
+
+hydra:
+  run:
+    dir: runs/${exp_name}/${now:%Y-%m-%d_%H-%M-%S}
+  job:
+    chdir: false

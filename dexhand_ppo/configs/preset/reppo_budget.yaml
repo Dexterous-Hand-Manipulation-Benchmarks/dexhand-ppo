@@ -1,0 +1,18 @@
+# @package _global_
+# "PPO with REPPO's update budget" (lab report XI): minibatches of 512, 4 epochs -> 1,024 updates per iteration,
+# about 390k over 50M steps (REPPO: 389,120). KL early stop guards against drifting off the data.
+preset_name: reppo_budget
+ppo:
+  num_minibatches: 256
+  num_epochs: 4
+  value_coef: 1.0
+  value_clip: false
+  entropy_coef: 0.0
+  normalize_obs: true
+  kl_stop: 1.5
+net:
+  shared: false
+  actor_hidden: [512, 256, 128]
+  critic_hidden: [512, 256, 128]
+  init_std: 1.0
+  min_std: 0.05

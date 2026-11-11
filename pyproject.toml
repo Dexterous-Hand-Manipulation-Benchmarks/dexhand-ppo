@@ -1,0 +1,45 @@
+[project]
+name = "dexhand-ppo"
+version = "0.1.0"
+description = "PPO for bimanual dexterous manipulation on DexMachina, with the update budget as a free parameter."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10,<3.11"
+# Versions are pinned by the dexhand-bench umbrella (torch 2.5.1, numpy 1.26.4); keep these open.
+dependencies = [
+    "torch",
+    "numpy",
+    "hydra-core>=1.3",
+    "omegaconf>=2.3",
+]
+
+[project.optional-dependencies]
+# CPU sanity tasks (Pendulum). Same-step autoreset needs gymnasium >= 1.1.
+gym = ["gymnasium>=1.1"]
+wandb = ["wandb"]
+
+[project.scripts]
+dexhand-ppo-train = "dexhand_ppo.train:main"
+
+[dependency-groups]
+# Standalone development environment (outside the umbrella): same versions as the umbrella's extras.
+dev = [
+    "pytest>=8",
+    "torch==2.5.1",
+    "numpy==1.26.4",
+    "gymnasium==1.1.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dexhand_ppo"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"

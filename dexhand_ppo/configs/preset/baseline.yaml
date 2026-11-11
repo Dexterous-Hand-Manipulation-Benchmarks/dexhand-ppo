@@ -1,0 +1,18 @@
+# @package _global_
+# Reproduces dexmachina's rl_games PPO (lab report Table I): 4 x 5 updates of 32,768 per iteration, shared
+# 512-512-256-128 ELU trunk, no observation normalisation, value coef 4 with clipping, no entropy bonus.
+preset_name: baseline
+ppo:
+  num_minibatches: 4
+  num_epochs: 5
+  value_coef: 4.0
+  value_clip: true
+  entropy_coef: 0.0
+  normalize_obs: false
+net:
+  shared: true
+  init_std: 1.0
+  min_std: 0.0
+env:
+  dexmachina:
+    rand_init_ratio: 0.0

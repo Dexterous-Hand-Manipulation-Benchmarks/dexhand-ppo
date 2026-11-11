@@ -1,0 +1,17 @@
+# @package _global_
+# Proposed defaults (design note section 5): 4x the baseline's updates, observation normalisation, separate
+# actor/critic, std lower bound. Not tuned yet.
+preset_name: default
+ppo:
+  num_minibatches: 16
+  num_epochs: 5
+  value_coef: 1.0
+  value_clip: false
+  entropy_coef: 0.0
+  normalize_obs: true
+net:
+  shared: false
+  actor_hidden: [512, 256, 128]
+  critic_hidden: [512, 256, 128]
+  init_std: 1.0
+  min_std: 0.05
