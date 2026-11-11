@@ -54,6 +54,46 @@ Every implementation detail that could matter for a report, especially where we 
   (gradient is zero below the bound).
 - `net.shared=true`: one trunk with two heads (rl_games); otherwise separate actor and critic.
 
+## DexMachina adapter (`envs/dexmachina.py`)
+- Env built from `env.dexmachina.args` (= `scripts/slurm/ppo.sbatch` = lab report Table VI) plus `-B`, `--hand`,
+  `--clip`, `--seed`, `--max_epochs` (= Emax 10,000) and `--rand_init_ratio`, parsed by dexmachina's own argparser;
+  unknown arguments are an error. `use_rl_games=True`, video off. The full arg list and a JSON view of the env, reward,
+  curriculum, randomisation and object configs go into `provenance.json`.
+- Verified on the built env (2026-11-11, CPU): obs 510, actions 44, episode length 200; zero_epoch 9000, warm-up 100,
+  decay ratios 0.9/0.8 (fr 1.0), thresholds task 0.6 / others 0.01, kp/kv init 80/5; rewards 1/0.3/0.3/3, task betas
+  10/1/5, contact beta 10, bc beta 500; rand_init_ratio 0.02.
+- `gs.init` once per process (backend from `device`, seed = run seed). Note: the curriculum constructor reseeds the
+  global numpy/torch RNGs with 42 (dexmachina); our sampling uses torch's global RNG after env construction.
+- Every step: actions clamped to [−1, 1]; obs and reward cloned (persistent buffers); NaN/inf replaced by 0 and
+  counted (`train/nan_obs_envs`, `train/nan_rewards`); `terminated` = dexmachina's reset mask, `truncated` = all false
+  (every episode end terminal, see above).
+- Episode statistics: return, length and per-step means of `task_rew`, `imi_rew`, `bc_rew`, `con_rew` per finished
+  episode (`train/episode_*`, window of the last 100 episodes). Per-step means of `pos_dist`, `rot_dist`, `arti_dist`,
+  `success_2cm/5cm` over each rollout (`env/*`, **assisted** physics).
+- Curriculum: before each rollout, `epoch = min(global_step · Emax // total_env_steps, Emax)` with
+  `total_env_steps = iterations · num_envs · num_steps`; `set_curriculum(epoch)` only when the epoch increases (381
+  calls over a 50M run; the spacing between reductions is counted in epochs since dexmachina `38ff004`). Logged:
+  `curriculum/epoch`, `curriculum/num_reductions` (calls that lowered the gains), `curriculum/num_dialbacks` (raised
+  them), `curriculum/hard_stop_applied` (gains zeroed by the hard stop after zero_epoch), `env/kp|kv|fr` (upper bounds).
+- Resume restores the counters and gains (and re-applies them to the object); the curriculum's reward and length
+  deques start empty again.
+
+## DexMachina evaluation (`DexMachinaEvaluator`)
+- A second BaseEnv in the same process with `num_eval_envs + 1` envs: dexmachina's `is_eval` turns the last env into
+  a dummy (not stepped, zero init qpos), so it is added and excluded from all metrics.
+- Permanently unassisted: `is_eval`, early-reset thresholds 0, `rand_init_ratio` 0, randomisation off, curriculum gains
+  zeroed once (object stays actuated with zero gains, as REPPO; `eval_rl_games.py` uses `actuated=False`),
+  `record_curriculum=False`, `log_add_metric=True` (500 vertices per part).
+- One full-length episode (200 steps) per env with the deterministic (mean) action, from deterministic initial states.
+- ADD values come from the env's online metric, computed inside `step` *before* the reset with the post-step demo
+  frame. `eval/auc_add`: AUC per object part (thresholds 1–9 cm, dexmachina's `compute_auc`), then averaged, which is
+  `compute_add.py`'s definition. Also logged: `eval/auc_add_part_mean` (AUC of the part-averaged ADD, REPPO's online
+  definition), `eval/add`, ADD-based success `eval/add_success_2cm|5cm` (per part, then averaged), and dexmachina's
+  pos/rot/arti success flags `eval/success_2cm|5cm` (FastTD3-style online metric).
+- Why not the `eval_rl_games.py` → `compute_add.py` path: it records the object state *after* `env.step()` and pairs
+  it with the *pre-step* demo index (one-frame lag), and at the last step the env has already reset, so the final
+  recorded state is the reset pose (verified 2026-11-11: identical to the post-reset state, max difference 0.0).
+
 ## Training loop and budget
 - Iterations = `total_steps // (num_envs · num_steps)` (integer; 50M → 381 iterations of 4096 × 32 = 49.9M steps).
 - Evaluation and periodic checkpoints whenever the env-step counter crosses a multiple of their interval, plus at

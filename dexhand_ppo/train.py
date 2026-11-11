@@ -156,7 +156,7 @@ def train(cfg) -> dict:
                         "perf/policy_s": t_policy, "perf/update_s": update_time})
         prev_step = global_step - steps_per_iter
         last_iteration = iteration == iterations - 1
-        if cfg.eval.enabled and (crossed(prev_step, global_step, cfg.eval.interval_steps) or last_iteration):
+        if evaluator is not None and (crossed(prev_step, global_step, cfg.eval.interval_steps) or last_iteration):
             eval_metrics = run_eval()
             metrics.update(eval_metrics)
             score = eval_metrics.get(evaluator.selection_metric)
@@ -175,7 +175,8 @@ def train(cfg) -> dict:
     save("final.pt", iterations)
     logger.close()
     train_env.close()
-    evaluator.close()
+    if evaluator is not None:
+        evaluator.close()
     return {"global_step": global_step, "best_score": best_score}
 
 

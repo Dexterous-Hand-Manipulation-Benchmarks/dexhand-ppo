@@ -82,5 +82,6 @@ class GymEvaluator:
 
 def make_gym_envs(cfg):
     train = GymVecEnv(cfg.env.gym.id, cfg.env.num_envs, cfg.seed, cfg.device)
-    evaluator = GymEvaluator(cfg.env.gym.id, cfg.env.gym.num_eval_episodes, cfg.seed, cfg.device)
+    evaluator = (GymEvaluator(cfg.env.gym.id, cfg.env.gym.num_eval_episodes, cfg.seed, cfg.device)
+                 if cfg.eval.enabled else None)
     return train, evaluator
