@@ -70,3 +70,6 @@ Every implementation detail that could matter for a report, especially where we 
 - 2026-11-11, Pendulum-v1 (16 envs × 256 steps, 10 epochs × 16 minibatches, γ 0.95, lr 1e-3, `default` network
   settings, CPU): deterministic eval return −130 after 53k steps, −113 ± 1 from 100k to 400k steps (solved;
   random ≈ −1200).
+- 2026-11-11, same Pendulum setup with the `baseline` preset (shared trunk, no obs normalisation, value coef 4 with
+  clipping): eval −206 at 53k steps, −115 at 100k, −113 to −131 until 400k (solved; slightly slower start than
+  `default`).
