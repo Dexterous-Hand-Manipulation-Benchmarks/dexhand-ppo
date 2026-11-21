@@ -90,3 +90,39 @@ def test_resume_continues_from_checkpoint(pendulum_cfg, tmp_path):
     assert result["global_step"] == 8192
     lines = [json.loads(line) for line in open(f"{pendulum_cfg.run_dir}/metrics.jsonl")]
     assert [line["train/iteration"] for line in lines] == [1]
+
+
+def test_seed_decides_initial_weights_even_if_env_construction_reseeds(pendulum_cfg, monkeypatch):
+    """DexMachina's env construction calls np.random.seed(42) / torch.manual_seed(42); the run seed must still win."""
+    pytest.importorskip("gymnasium")
+    import numpy as np
+    import torch
+
+    import dexhand_ppo.train as train_module
+
+    real_make_envs, real_model = train_module.make_envs, train_module.ActorCritic
+
+    def make_envs_that_reseed(cfg):
+        envs = real_make_envs(cfg)
+        np.random.seed(42)
+        torch.manual_seed(42)
+        return envs
+
+    class Captured(Exception):
+        pass
+
+    def capture_initial_weights(*args, **kwargs):
+        model = real_model(*args, **kwargs)
+        raise Captured(torch.cat([p.detach().flatten().clone() for p in model.parameters()]))
+
+    monkeypatch.setattr(train_module, "make_envs", make_envs_that_reseed)
+    monkeypatch.setattr(train_module, "ActorCritic", capture_initial_weights)
+    weights = {}
+    for seed in (0, 1, 0):
+        with open_dict(pendulum_cfg):
+            pendulum_cfg.seed = seed
+        with pytest.raises(Captured) as captured:
+            train_module.train(pendulum_cfg)
+        weights.setdefault(seed, []).append(captured.value.args[0])
+    assert not torch.equal(weights[0][0], weights[1][0])
+    assert torch.equal(weights[0][0], weights[0][1])

@@ -48,6 +48,9 @@ def train(cfg) -> dict:
     ppo_cfg = cfg.ppo
 
     train_env, evaluator = make_envs(cfg)
+    # Seed again: building a DexMachina env reseeds the global numpy/torch RNGs with 42 (curriculum, ADD vertex
+    # sampling), which would give every run seed the same initial weights and sampling stream.
+    seed_everything(cfg.seed)
     iterations = num_iterations(cfg)
     env_description = train_env.describe() if hasattr(train_env, "describe") else {}
     provenance = write_provenance(str(run_dir), resolved, extra={

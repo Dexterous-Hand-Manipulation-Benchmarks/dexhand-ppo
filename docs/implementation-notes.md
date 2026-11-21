@@ -62,8 +62,12 @@ Every implementation detail that could matter for a report, especially where we 
 - Verified on the built env (2026-11-11, CPU): obs 510, actions 44, episode length 200; zero_epoch 9000, warm-up 100,
   decay ratios 0.9/0.8 (fr 1.0), thresholds task 0.6 / others 0.01, kp/kv init 80/5; rewards 1/0.3/0.3/3, task betas
   10/1/5, contact beta 10, bc beta 500; rand_init_ratio 0.02.
-- `gs.init` once per process (backend from `device`, seed = run seed). Note: the curriculum constructor reseeds the
-  global numpy/torch RNGs with 42 (dexmachina); our sampling uses torch's global RNG after env construction.
+- `gs.init` once per process (backend from `device`, seed = run seed). Building a DexMachina env reseeds the global
+  numpy/torch RNGs with 42 (curriculum constructor; numpy also in the ADD vertex sampling). `train.py` therefore
+  seeds random/numpy/torch with the run seed again right after `make_envs`, before the networks are created, so
+  the run seed decides the initial weights, action sampling and the env's own draws from the global generators
+  (e.g. the uniform curriculum's per-env gains). Before this fix every seed started from identical weights and an
+  identical sampling stream. Test: `test_seed_decides_initial_weights_even_if_env_construction_reseeds`.
 - Every step: actions clamped to [−1, 1]; obs and reward cloned (persistent buffers); NaN/inf replaced by 0 and
   counted (`train/nan_obs_envs`, `train/nan_rewards`); `terminated` = dexmachina's reset mask, `truncated` = all false
   (every episode end terminal, see above).
