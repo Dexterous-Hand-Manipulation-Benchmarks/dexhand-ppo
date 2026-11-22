@@ -4,6 +4,15 @@ Every implementation detail that could matter for a report, especially where we 
 (Schulman et al., 2017), from dexmachina's rl_games configuration (lab report Table I) or from the common
 "37 implementation details of PPO" (Huang et al., 2022). Updated in the same commit as the code it describes.
 
+## Design goals
+- A PPO for DexMachina that can be trusted and improved in measurable steps. The lab report attributes PPO's deficit
+  mainly to its update budget (7,620 gradient updates in 50M env steps, against REPPO's 389k), so the update budget
+  is a free parameter, and every deviation from the rl_games baseline is a separate flag that can be ablated.
+- Env handling, evaluation and logging correct by construction (terminal handling, unassisted evaluation, true env
+  steps).
+- Not a goal: a general RL library, multi-GPU, vision, changing the env or the benchmark protocol, or rl_games
+  compatibility (checkpoints, config format).
+
 ## Configuration
 - Hydra with a structured schema (`dexhand_ppo/config.py`): unknown or misspelled keys are errors.
 - Defaults-list order: base values, then `preset/`, then `env/`. An env file may override preset values (Pendulum
