@@ -32,14 +32,14 @@ def test_presets_compose_with_dexmachina(preset):
     batch = cfg.env.num_envs * cfg.ppo.num_steps
     assert batch % cfg.ppo.num_minibatches == 0
     assert cfg.total_steps // batch == 381  # lab report Table I: 50M steps = 381 iterations of 4096 x 32
-    assert "--retarget_name" in cfg.env.dexmachina.args
-    assert cfg.env.dexmachina.curriculum_max_epochs == 10_000
 
 
-def test_rand_init_only_off_for_baseline():
-    assert _compose(["preset=default"]).env.dexmachina.rand_init_ratio == 0.02
-    assert _compose(["preset=reppo_budget"]).env.dexmachina.rand_init_ratio == 0.02
-    assert _compose(["preset=baseline"]).env.dexmachina.rand_init_ratio == 0.0
+@pytest.mark.parametrize("override", ["env.dexmachina.rand_init_ratio=0.02", "env.dexmachina.args=[-act]",
+                                      "env.dexmachina.curriculum_max_epochs=5000"])
+def test_task_settings_cannot_be_chosen_per_run(override):
+    # dexmachina's benchmark task fixes them for every method; a run may choose only hand and clip
+    with pytest.raises(ConfigCompositionException):
+        _compose([override])
 
 
 def test_env_and_preset_files_override_base_values():

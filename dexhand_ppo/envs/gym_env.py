@@ -66,7 +66,8 @@ class GymEvaluator:
         self.num_episodes = num_episodes
 
     @torch.no_grad()
-    def evaluate(self, policy) -> dict:
+    def evaluate(self, policy, global_step: int) -> dict:
+        """``global_step`` names a saved evaluation in the DexMachina evaluator; this one saves nothing."""
         obs = self.env.reset()
         returns = torch.zeros(self.num_episodes, device=self.env.device)
         finished = torch.zeros(self.num_episodes, dtype=torch.bool, device=self.env.device)

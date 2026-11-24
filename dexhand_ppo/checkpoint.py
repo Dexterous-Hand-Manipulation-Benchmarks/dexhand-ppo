@@ -3,6 +3,8 @@ from pathlib import Path
 
 import torch
 
+CHECKPOINT_DIRNAME = "checkpoints"  # in the run dir; the dexmachina run spec is saved here too
+
 
 def save_checkpoint(path, *, model, optimizer, obs_norm, value_norm, iteration: int, global_step: int,
                     learning_rate: float, num_updates: int, env_state: dict, resolved_cfg: dict) -> None:

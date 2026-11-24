@@ -22,9 +22,11 @@ class MetricLogger:
                 if UniversalLogger is None:
                     print("[INFO] dexhand_bench not installed: unified W&B metric logging disabled")
                 else:
+                    from dexmachina.envs.factory import EVAL_CONFIG
+
                     d = cfg.env.dexmachina
                     UniversalLogger.install(algo="ppo", hand=d.hand, clip=d.clip, seed=cfg.seed,
-                                            num_envs=cfg.env.num_envs, num_eval_envs=d.num_eval_envs,
+                                            num_envs=cfg.env.num_envs, num_eval_envs=EVAL_CONFIG.num_envs,
                                             horizon_length=cfg.ppo.num_steps)
             self.wandb = wandb.init(project=cfg.log.project, entity=cfg.log.entity, group=cfg.log.group,
                                     name=cfg.exp_name, dir=run_dir,

@@ -64,26 +64,39 @@ Every implementation detail that could matter for a report, especially where we 
 - `net.shared=true`: one trunk with two heads (rl_games); otherwise separate actor and critic.
 
 ## DexMachina adapter (`envs/dexmachina.py`)
-- Env built from `env.dexmachina.args` (= `scripts/slurm/ppo.sbatch` = lab report Table VI) plus `-B`, `--hand`,
-  `--clip`, `--seed`, `--max_epochs` (= Emax 10,000) and `--rand_init_ratio`, parsed by dexmachina's own argparser;
-  unknown arguments are an error. `use_rl_games=True`, video off. The full arg list and a JSON view of the env, reward,
-  curriculum, randomisation and object configs go into `provenance.json`.
+- The env is dexmachina's benchmark task: `benchmark_spec(RunChoices(hand, clip, seed, num_envs))`
+  (`dexmachina.envs.benchmark_task`), built with `DexMachinaVecEnv.from_spec` and no reward overrides. A run chooses
+  only `env.dexmachina.hand`, `env.dexmachina.clip` (one of the benchmark clips), `seed` and `env.num_envs`; every
+  other env setting is fixed by the task, the same for every method. dexhand-ppo has no env settings of its own.
+- Change from the earlier adapter, which built the env from its own copy of the lab report's Table VI arg list: the
+  arg list matched the benchmark task in every field (compared field by field and on the full `get_all_env_cfg`
+  output, 2026-11-23) except the share of random start frames, `rand_init_ratio`: 0.02 before (`default`,
+  `reppo_budget`), now the task's value (0.0 as of 2026-11-23, the `EnvSpec` default). This changes training results
+  of the `default` and `reppo_budget` presets; `baseline` had 0.0 already.
+- The run's `EnvSpec` and its `task_hash` go into `provenance.json`; `env_spec.json` (dexmachina's `save_run_spec`:
+  spec, reward overrides, dexmachina commit) is written into `checkpoints/` before training, so evaluation can
+  rebuild the task from a checkpoint's directory. The file is never overwritten, so a resumed run needs a new run dir
+  (the default run dir has a timestamp).
 - Verified on the built env (2026-11-11, CPU): obs 510, actions 44, episode length 200; zero_epoch 9000, warm-up 100,
   decay ratios 0.9/0.8 (fr 1.0), thresholds task 0.6 / others 0.01, kp/kv init 80/5; rewards 1/0.3/0.3/3, task betas
-  10/1/5, contact beta 10, bc beta 500; rand_init_ratio 0.02.
+  10/1/5, contact beta 10, bc beta 500.
 - `gs.init` once per process (backend from `device`, seed = run seed). Building a DexMachina env reseeds the global
   numpy/torch RNGs with 42 (curriculum constructor; numpy also in the ADD vertex sampling). `train.py` therefore
   seeds random/numpy/torch with the run seed again right after `make_envs`, before the networks are created, so
   the run seed decides the initial weights, action sampling and the env's own draws from the global generators
   (e.g. the uniform curriculum's per-env gains). Before this fix every seed started from identical weights and an
   identical sampling stream. Test: `test_seed_decides_initial_weights_even_if_env_construction_reseeds`.
-- Every step: actions clamped to [−1, 1]; obs and reward cloned (persistent buffers); NaN/inf replaced by 0 and
-  counted (`train/nan_obs_envs`, `train/nan_rewards`); `terminated` = dexmachina's reset mask, `truncated` = all false
-  (every episode end terminal, see above).
+- Every step: actions clamped to [−1, 1] by the env; obs and reward come as copies from `DexMachinaVecEnv`; NaN/inf in obs,
+  reward and final obs replaced by 0 and counted (`train/nan_obs_envs`, `train/nan_rewards`). `terminated` and
+  `truncated` are `DexMachinaVecEnv`'s, from the cause of each episode end: in the benchmark task every end (demo
+  end, drop, early reset, NaN) is terminated and none truncated, so no value is bootstrapped (consistent because the
+  obs contains t/T). `final_obs` (the obs before the reset) is passed on for truncation bootstrapping in tasks that
+  have truncations.
 - Episode statistics: return, length and per-step means of `task_rew`, `imi_rew`, `bc_rew`, `con_rew` per finished
   episode (`train/episode_*`, window of the last 100 episodes). Per-step means of `pos_dist`, `rot_dist`, `arti_dist`,
   `success_2cm/5cm` over each rollout (`env/*`, **assisted** physics).
-- Curriculum: before each rollout, `epoch = min(global_step · Emax // total_env_steps, Emax)` with
+- Curriculum: before each rollout, `epoch = min(global_step · Emax // total_env_steps, Emax)` (Emax = the task's
+  `max_epochs`, 10,000) with
   `total_env_steps = iterations · num_envs · num_steps`; `set_curriculum(epoch)` only when the epoch increases (381
   calls over a 50M run; the spacing between reductions is counted in epochs since dexmachina `38ff004`). Logged:
   `curriculum/epoch`, `curriculum/num_reductions` (calls that lowered the gains), `curriculum/num_dialbacks` (raised
@@ -92,20 +105,26 @@ Every implementation detail that could matter for a report, especially where we 
   deques start empty again.
 
 ## DexMachina evaluation (`DexMachinaEvaluator`)
-- A second BaseEnv in the same process with `num_eval_envs + 1` envs: dexmachina's `is_eval` turns the last env into
-  a dummy (not stepped, zero init qpos), so it is added and excluded from all metrics.
-- Permanently unassisted: `is_eval`, early-reset thresholds 0, `rand_init_ratio` 0, randomisation off, curriculum gains
-  zeroed once (object stays actuated with zero gains, as REPPO; `eval_rl_games.py` uses `actuated=False`),
-  `record_curriculum=False`, `log_add_metric=True` (500 vertices per part).
-- One full-length episode (200 steps) per env with the deterministic (mean) action, from deterministic initial states.
-- ADD values come from the env's online metric, computed inside `step` *before* the reset with the post-step demo
-  frame. `eval/auc_add`: AUC per object part (thresholds 1–9 cm, dexmachina's `compute_auc`), then averaged, which is
-  `compute_add.py`'s definition. Also logged: `eval/auc_add_part_mean` (AUC of the part-averaged ADD, REPPO's online
-  definition), `eval/add`, ADD-based success `eval/add_success_2cm|5cm` (per part, then averaged), and dexmachina's
-  pos/rot/arti success flags `eval/success_2cm|5cm` (FastTD3-style online metric).
-- Why not the `eval_rl_games.py` → `compute_add.py` path: it records the object state *after* `env.step()` and pairs
-  it with the *pre-step* demo index (one-frame lag), and at the last step the env has already reset, so the final
-  recorded state is the reset pose (verified 2026-11-11: identical to the post-reset state, max difference 0.0).
+- The team's shared evaluation (dexmachina `envs/evaluation.py`): one env from `make_eval_env(spec)` (`is_eval`, no
+  assistance, object not actuated, no early reset, no randomisation, ADD metric on, outside the curriculum
+  statistics). Each evaluation runs `zero_action_floor` (one episode with zero actions) and then one full-length
+  episode with the deterministic (mean) action via `rollout_episode`, both on that env, and scores both with `score`.
+- Logged: every scalar of the policy's `EvalScore` as `eval/<name>` (`auc_add`: AUC per object part over 1–9 cm, then
+  the mean, the paper's definition and the selection metric; `auc_add_of_mean`: REPPO's online definition;
+  `mean_add`; ADD-based `success_2cm|5cm`; `nan_rate`; `drop_rate`), the AUC of each part as
+  `eval/auc_add_part/<part>`, and the same for the floor as `eval/floor/<name>` (FlashSAC's names for these scores).
+  Scores are raw, not normalised by the floor.
+- The policy episode's trajectory (dexmachina `save_trajectory`: object states, ADD per part, NaN, reset and drop
+  flags, paired demo frames) is saved as `eval_trajectories/trajectory_step_<env steps>.npz`, so its scores can be
+  recomputed with `score(load_trajectory(path))`; the last one is the evaluation of `final.pt`. The online
+  evaluation sets no seed: nothing random reaches it (one env, no randomisation, mean action), and reseeding the
+  global generators would change the training run's random stream.
+- Change from the earlier evaluator: it ran 16 deterministic envs (plus dexmachina's dummy env) with the object
+  actuated at zero gains and its own ADD bookkeeping; `eval/success_2cm|5cm` were dexmachina's pos/rot/arti flags and
+  are now ADD-based (the earlier `eval/add_success_*`), `eval/auc_add_part_mean` is now `eval/auc_add_of_mean`,
+  `eval/add` is `eval/mean_add`, `eval/pos_dist` is gone. The shared recorder pairs the state after step t with demo
+  frame t + 1 and scores the last step before its reset. Scores of the earlier evaluator (and REPPO's online
+  evaluation, also actuated at zero gains) are therefore not comparable with these.
 
 ## Training loop and budget
 - Iterations = `total_steps // (num_envs · num_steps)` (integer; 50M → 381 iterations of 4096 × 32 = 49.9M steps).

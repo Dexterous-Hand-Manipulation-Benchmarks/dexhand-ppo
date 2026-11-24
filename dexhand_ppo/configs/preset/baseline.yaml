@@ -13,6 +13,3 @@ net:
   shared: true
   init_std: 1.0
   min_std: 0.0
-env:
-  dexmachina:
-    rand_init_ratio: 0.0

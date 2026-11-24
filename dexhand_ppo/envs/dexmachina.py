@@ -1,24 +1,35 @@
-"""DexMachina adapter: benchmark env construction, done handling, curriculum, metrics and unassisted evaluation.
+"""DexMachina adapter: the benchmark task, done handling, curriculum, metrics and the shared evaluation.
+
+The env is dexmachina's benchmark task (``dexmachina.envs.benchmark_task``): a run chooses hand, clip, seed and the
+number of envs; every other env setting, including the share of random start frames, is fixed there, so every
+method trains on the same task. Training steps go through dexmachina's ``DexMachinaVecEnv``, evaluation through the
+team's shared protocol (``make_eval_env``, ``rollout_episode``, ``score``, ``zero_action_floor``).
 
 DexMachina specifics this module handles (see docs/implementation-notes.md):
-- ``BaseEnv.step`` resets finished envs internally and returns the post-reset obs; there is no terminal obs.
-- With ``use_rl_games=True`` it returns (obs_dict, rew, terminated, time_outs, extras), where *both* flags equal the
-  reset mask for every reset (time-out, early reset, NaN). All episode ends are therefore terminal here.
-- ``rew_buf`` and the flags are persistent buffers updated in place: they are cloned every step.
+- ``DexMachinaVecEnv.step`` resets finished envs inside the step and returns the post-reset obs; ``final_obs`` holds
+  the obs before the reset.
+- Every episode end of the benchmark task (demo end, drop, early reset, NaN) is terminated; it has no truncations.
 - The curriculum only advances if the learner calls ``set_curriculum(epoch)``.
-- With ``is_eval`` and more than one env, the last env is a dummy (not stepped, zero init qpos); it is excluded
-  from evaluation metrics.
 """
-import numpy as np
+import json
+from dataclasses import fields
+from pathlib import Path
+from types import MappingProxyType
+
 import torch
 
 from dexhand_ppo.vec_env import EpisodeTracker
 
 EPISODE_TERMS = ("task_rew", "imi_rew", "bc_rew", "con_rew")   # per-episode means of these rew_dict entries
 STEP_METRICS = ("pos_dist", "rot_dist", "arti_dist", "success_2cm", "success_5cm")  # assisted, per step
-ADD_PARTS = ("add_top", "add_bottom")
-SUCCESS_THRESHOLDS = {"2cm": 0.02, "5cm": 0.05}
 CURRICULUM_TERMS = ("kp", "kv", "fr")
+# EvalScore fields that are mappings: the per-part AUCs are logged one key per part; the caller-chosen part
+# aggregations are not requested here, so that field stays empty.
+EVAL_SCORE_MAPPINGS = ("auc_add_part", "auc_add_aggregated")
+# The benchmark task sets every reward weight through its EnvSpec.
+NO_REWARD_OVERRIDES = MappingProxyType({})
+TRAJECTORY_DIRNAME = "eval_trajectories"            # in the run dir
+TRAJECTORY_FILENAME = "trajectory_step_{step}.npz"  # env steps at the evaluation; the last one is final.pt's
 
 _GENESIS_READY = False
 
@@ -34,81 +45,34 @@ def init_genesis(device: torch.device, seed: int) -> None:
     _GENESIS_READY = True
 
 
-def build_argv(cfg, num_envs: int, eval_mode: bool) -> list[str]:
+def dexmachina_device(device: torch.device) -> str:
+    return "cpu" if device.type == "cpu" else "cuda"
+
+
+def run_spec(cfg):
+    """The benchmark task's EnvSpec for this run."""
+    from dexmachina.envs.benchmark_task import RunChoices, benchmark_spec
+
     d = cfg.env.dexmachina
-    rand_init = 0.0 if eval_mode else d.rand_init_ratio
-    return [*map(str, d.args), "-B", str(num_envs), "--hand", d.hand, "--clip", d.clip, "--seed", str(cfg.seed),
-            "--max_epochs", str(d.curriculum_max_epochs), "--rand_init_ratio", str(rand_init)]
+    return benchmark_spec(RunChoices(hand=d.hand, clip=d.clip, seed=cfg.seed, num_envs=cfg.env.num_envs))
 
 
-def build_env_kwargs(cfg, num_envs: int, eval_mode: bool) -> tuple[list[str], dict]:
-    from dexmachina.envs.constructors import get_all_env_cfg, get_common_argparser
-
-    argv = build_argv(cfg, num_envs, eval_mode)
-    args, unknown = get_common_argparser().parse_known_args(argv)
-    if unknown:  # a typo in env.dexmachina.args must not be silently ignored
-        raise ValueError(f"unknown dexmachina arguments: {unknown}")
-    device = "cpu" if torch.device(cfg.device).type == "cpu" else "cuda"
-    kwargs = get_all_env_cfg(args, device=device)
-    env_cfg = kwargs["env_cfg"]
-    env_cfg["use_rl_games"] = True
-    env_cfg["record_video"] = False
-    if eval_mode:  # permanently unassisted, full-length, deterministic episodes (REPPO's eval_mode recipe)
-        env_cfg["is_eval"] = True
-        env_cfg["early_reset_threshold"] = 0.0
-        env_cfg["early_reset_aux_thres"] = dict(con=0.0, imi=0.0, bc=0.0)
-        env_cfg["rand_init_ratio"] = 0.0
-        env_cfg["log_add_metric"] = True
-        env_cfg["add_num_verts"] = 500
-        rand_cfg = kwargs.setdefault("rand_cfg", {})
-        if isinstance(rand_cfg, dict):
-            rand_cfg["randomize"] = False
-    else:
-        env_cfg["log_add_metric"] = False
-    return argv, kwargs
-
-
-def _jsonable(value, depth: int = 0):
-    """Small, JSON-serialisable view of a config (drops tensors/arrays and deep nesting) for provenance."""
-    if isinstance(value, (bool, int, float, str)) or value is None:
-        return value
-    if isinstance(value, (list, tuple)) and len(value) <= 64 and all(
-            isinstance(v, (bool, int, float, str)) or v is None for v in value):
-        return list(value)
-    if isinstance(value, dict) and depth < 3:
-        out = {str(k): _jsonable(v, depth + 1) for k, v in value.items()}
-        return {k: v for k, v in out.items() if v is not None or k in value and value[k] is None}
-    return None
-
-
-def _zero_gains(env) -> None:
-    if getattr(env, "use_curriculum", False) and env.curriculum is not None:
-        curriculum = env.curriculum
-        for key in curriculum.decay_terms:
-            curriculum.curr_gains[key] = 0.0
-            curriculum.curr_gains_lower[key] = 0.0
-        curriculum.reset_object_gains()
-        env.record_curriculum = False  # eval episodes must never enter the curriculum statistics
-
-
-class DexMachinaVecEnv:
+class DexMachinaTrainEnv:
     """Training env (assisted physics, curriculum driven by the normalised progress counter)."""
 
-    def __init__(self, cfg, env=None):
-        """``env``: an already built BaseEnv-like object (tests); otherwise the benchmark env is built from cfg."""
+    def __init__(self, cfg, vec_env=None):
+        """``vec_env``: an already built DexMachinaVecEnv-like object with ``spec`` and the BaseEnv as ``env``
+        (tests); otherwise the benchmark env is built from cfg."""
         self.cfg = cfg
         self.device = torch.device(cfg.device)
-        if env is None:
-            from dexmachina.envs.base_env import BaseEnv
+        if vec_env is None:
+            from dexmachina.envs.vec_env import DexMachinaVecEnv
 
             init_genesis(self.device, cfg.seed)
-            self.argv, kwargs = build_env_kwargs(cfg, cfg.env.num_envs, eval_mode=False)
-            self.env_kwargs_summary = {k: _jsonable(kwargs.get(k)) for k in
-                                       ("env_cfg", "reward_cfg", "curriculum_cfg", "rand_cfg", "object_cfgs")}
-            env = BaseEnv(**kwargs)
-        else:
-            self.argv, self.env_kwargs_summary = [], {}
-        self.env = env
+            vec_env = DexMachinaVecEnv.from_spec(run_spec(cfg), dexmachina_device(self.device), NO_REWARD_OVERRIDES)
+        self.vec_env = vec_env
+        self.spec = vec_env.spec
+        self.env = vec_env.env
         self.num_envs = self.env.num_envs
         self.obs_dim = int(self.env.num_obs)
         self.action_dim = int(self.env.action_dim)
@@ -117,7 +81,8 @@ class DexMachinaVecEnv:
 
         steps_per_iteration = cfg.env.num_envs * cfg.ppo.num_steps
         self.total_env_steps = (cfg.total_steps // steps_per_iteration) * steps_per_iteration
-        self.max_epochs = int(cfg.env.dexmachina.curriculum_max_epochs)
+        # Emax of the normalised progress counter; the env derives its zero_epoch from the same spec value.
+        self.max_epochs = int(self.spec.max_epochs)
         self.current_epoch = -1
         self.num_reductions = 0
         self.num_dialbacks = 0
@@ -129,30 +94,29 @@ class DexMachinaVecEnv:
 
     # ---- VecEnv protocol ----
     def reset(self) -> torch.Tensor:
-        obs_dict, _ = self.env.reset()
-        return obs_dict["policy"].clone()
+        obs, _ = self.vec_env.reset()
+        return obs
 
     def step(self, actions: torch.Tensor):
-        obs_dict, rew, terminated, _time_outs, _extras = self.env.step(actions.clamp(-1.0, 1.0))
-        obs = obs_dict["policy"].clone()
-        rew = rew.clone()
-        done = terminated.clone().bool()
+        obs, rew, terminated, truncated, vec_info = self.vec_env.step(actions)  # BaseEnv clamps to its action_clip
+        final_obs = vec_info["final_obs"]
         nan_obs, nan_rew = ~torch.isfinite(obs), ~torch.isfinite(rew)
         if nan_obs.any() or nan_rew.any():
             self._nan_obs += int(nan_obs.any(dim=-1).sum())
             self._nan_rew += int(nan_rew.sum())
             obs = torch.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
             rew = torch.nan_to_num(rew, nan=0.0, posinf=0.0, neginf=0.0)
+        # only read for truncation bootstrapping; sanitised like obs so that a bootstrap never reads NaN
+        final_obs = torch.nan_to_num(final_obs, nan=0.0, posinf=0.0, neginf=0.0)
+        done = terminated | truncated
         rew_dict = self.env.rew_dict
         terms = {k: rew_dict[k].float() for k in EPISODE_TERMS if k in rew_dict}
         for key in STEP_METRICS:
             if key in rew_dict:
                 self._step_sums[key] = self._step_sums.get(key, 0.0) + rew_dict[key].float().mean()
         self._num_steps += 1
-        info = {"episode": self.tracker.step(rew, done, terms)}
-        # All ends are terminal: dexmachina cannot tell time-outs from failures, and the obs contains t/T.
-        truncated = torch.zeros_like(done)
-        return obs, rew, done, truncated, info
+        info = {"episode": self.tracker.step(rew, done, terms), "final_obs": final_obs, "final_obs_mask": done}
+        return obs, rew, terminated, truncated, info
 
     def on_iteration(self, global_step: int) -> dict:
         """Advance the curriculum on the normalised progress counter and return env metrics of the last rollout."""
@@ -163,7 +127,7 @@ class DexMachinaVecEnv:
         self._step_sums, self._num_steps = {}, 0
 
         epoch = min(global_step * self.max_epochs // self.total_env_steps, self.max_epochs)
-        curriculum = self.env.curriculum if getattr(self.env, "use_curriculum", False) else None
+        curriculum = self._curriculum()
         if curriculum is not None and epoch > self.current_epoch:
             before = dict(curriculum.curr_gains)
             self.env.set_curriculum(epoch)
@@ -187,14 +151,26 @@ class DexMachinaVecEnv:
     def close(self) -> None:
         pass  # Genesis has no per-scene teardown; the process exit cleans up
 
+    def _curriculum(self):
+        return self.env.curriculum if getattr(self.env, "use_curriculum", False) else None
+
     # ---- provenance and checkpoints ----
     def describe(self) -> dict:
-        return {"kind": "dexmachina", "argv": self.argv, "obs_dim": self.obs_dim, "action_dim": self.action_dim,
+        from dexmachina.envs.factory import task_hash
+
+        return {"kind": "dexmachina", "spec": json.loads(self.spec.to_json()), "task_hash": task_hash(self.spec),
+                "obs_dim": self.obs_dim, "action_dim": self.action_dim,
                 "max_episode_length": self.max_episode_length, "curriculum_total_env_steps": self.total_env_steps,
-                "env_kwargs": self.env_kwargs_summary}
+                "curriculum_zero_epoch": self.env.curriculum.zero_epoch}
+
+    def save_run_spec(self, directory: Path) -> Path:
+        """``env_spec.json`` next to the checkpoints, from which evaluation rebuilds this run's task."""
+        from dexmachina.envs.run_spec import save_run_spec
+
+        return save_run_spec(directory, self.spec, NO_REWARD_OVERRIDES)
 
     def state_dict(self) -> dict:
-        curriculum = self.env.curriculum if getattr(self.env, "use_curriculum", False) else None
+        curriculum = self._curriculum()
         state = {"current_epoch": self.current_epoch, "num_reductions": self.num_reductions,
                  "num_dialbacks": self.num_dialbacks, "hard_stop_epoch": self.hard_stop_epoch}
         if curriculum is not None:
@@ -207,7 +183,7 @@ class DexMachinaVecEnv:
         """Restores counters and gains. The curriculum's reward/length deques start empty again (documented)."""
         for key in ("current_epoch", "num_reductions", "num_dialbacks", "hard_stop_epoch"):
             setattr(self, key, state[key])
-        curriculum = self.env.curriculum if getattr(self.env, "use_curriculum", False) else None
+        curriculum = self._curriculum()
         if curriculum is not None and "curr_gains" in state:
             curriculum.curr_gains = dict(state["curr_gains"])
             curriculum.curr_gains_lower = dict(state["curr_gains_lower"])
@@ -216,64 +192,49 @@ class DexMachinaVecEnv:
             curriculum.reset_object_gains()
 
 
+def score_metrics(prefix: str, scored) -> dict:
+    """Every scalar of a dexmachina ``EvalScore`` as ``<prefix><name>``, the AUC of each object part as
+    ``<prefix>auc_add_part/<part>`` (FlashSAC's names for the same scores)."""
+    metrics = {f"{prefix}{f.name}": float(getattr(scored, f.name)) for f in fields(scored)
+               if f.name not in EVAL_SCORE_MAPPINGS}
+    metrics.update({f"{prefix}auc_add_part/{part}": auc for part, auc in scored.auc_add_part.items()})
+    return metrics
+
+
 class DexMachinaEvaluator:
-    """Separate, permanently unassisted env: one full-length deterministic episode per real env."""
+    """The shared evaluation: per call, the zero-action floor and one deterministic, unassisted, full-length policy
+    episode on the same single-env eval env. The policy episode's trajectory is saved, so its scores can be
+    recomputed from the file."""
 
     selection_metric = "eval/auc_add"
 
-    def __init__(self, cfg, env=None):
-        """``env``: an already built eval env whose last env is the dummy (tests); otherwise built from cfg."""
-        if env is None:
-            from dexmachina.envs.base_env import BaseEnv
+    def __init__(self, spec, device: torch.device, trajectory_dir: Path):
+        from dexmachina.envs.factory import make_eval_env, task_hash
+        from dexmachina.envs.run_spec import current_dexmachina_state
 
-            init_genesis(torch.device(cfg.device), cfg.seed)
-            num_real = int(cfg.env.dexmachina.num_eval_envs)
-            self.argv, kwargs = build_env_kwargs(cfg, num_real + 1, eval_mode=True)  # +1: dexmachina's dummy env
-            env = BaseEnv(**kwargs)
-        else:
-            self.argv = []
-        self.env = env
-        _zero_gains(self.env)
-        self.num_real = self.env.num_envs - 1
-        self.max_episode_length = int(self.env.max_episode_length)
+        self.spec = spec
+        self.trajectory_dir = trajectory_dir
+        self.task_hash = task_hash(spec)
+        self.dexmachina_sha = current_dexmachina_state().sha
+        self.env = make_eval_env(spec, dexmachina_device(device))
 
     @torch.no_grad()
-    def evaluate(self, policy) -> dict:
-        from dexmachina.envs.add_metric import compute_auc
+    def evaluate(self, policy, global_step: int) -> dict:
+        from dexmachina.envs.evaluation import rollout_episode, save_trajectory, score, zero_action_floor
 
-        obs_dict, _ = self.env.reset()
-        obs = obs_dict["policy"]
-        per_step = {k: [] for k in (*ADD_PARTS, "add", "success_2cm", "success_5cm", "pos_dist")}
-        for _ in range(self.max_episode_length):
-            obs_dict, _rew, _term, _trunc, extras = self.env.step(policy(obs).clamp(-1.0, 1.0))
-            obs = obs_dict["policy"]
-            log = extras["log"]
-            for key in (*ADD_PARTS, "add"):
-                per_step[key].append(log[key][: self.num_real].float().cpu().numpy())
-            for key in ("success_2cm", "success_5cm", "pos_dist"):
-                per_step[key].append(self.env.rew_dict[key][: self.num_real].float().cpu().numpy())
-        arrays = {k: np.stack(v) for k, v in per_step.items()}   # (T, num_real)
-        parts = [arrays[p] for p in ADD_PARTS]
-        metrics = {
-            # compute_add.py's definition: AUC per object part, then averaged
-            "eval/auc_add": float(np.mean([compute_auc(p.ravel()) for p in parts])),
-            # REPPO's online definition (AUC of the part-averaged ADD), for comparison
-            "eval/auc_add_part_mean": compute_auc(arrays["add"].ravel()),
-            "eval/add": float(arrays["add"].mean()),
-            "eval/success_2cm": float(arrays["success_2cm"].mean()),   # pos/rot/arti thresholds (FastTD3-style)
-            "eval/success_5cm": float(arrays["success_5cm"].mean()),
-            "eval/pos_dist": float(arrays["pos_dist"].mean()),
-            "eval/num_envs": self.num_real,
-        }
-        for name, threshold in SUCCESS_THRESHOLDS.items():  # ADD-based, per part then averaged (like the AUC)
-            metrics[f"eval/add_success_{name}"] = float(np.mean([(p < threshold).mean() for p in parts]))
-        return metrics
+        floor = zero_action_floor(self.env, self.spec.hand, self.spec.clip)
+        trajectory = rollout_episode(self.env, policy, self.spec.hand, self.spec.clip, self.task_hash,
+                                     self.dexmachina_sha)
+        self.trajectory_dir.mkdir(parents=True, exist_ok=True)
+        save_trajectory(self.trajectory_dir / TRAJECTORY_FILENAME.format(step=global_step), trajectory)
+        return {**score_metrics("eval/", score(trajectory)), **score_metrics("eval/floor/", floor)}
 
     def close(self) -> None:
         pass
 
 
 def make_dexmachina_envs(cfg):
-    train_env = DexMachinaVecEnv(cfg)
-    evaluator = DexMachinaEvaluator(cfg) if cfg.eval.enabled else None
+    train_env = DexMachinaTrainEnv(cfg)
+    evaluator = (DexMachinaEvaluator(train_env.spec, train_env.device, Path(cfg.run_dir) / TRAJECTORY_DIRNAME)
+                 if cfg.eval.enabled else None)
     return train_env, evaluator

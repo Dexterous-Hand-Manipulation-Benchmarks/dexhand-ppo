@@ -2,7 +2,7 @@
 
 
 def make_envs(cfg):
-    """Returns (train_env, evaluator). The evaluator has ``evaluate(policy) -> dict`` and ``close()``."""
+    """Returns (train_env, evaluator). The evaluator has ``evaluate(policy, global_step) -> dict`` and ``close()``."""
     if cfg.env.kind == "gym":
         from dexhand_ppo.envs.gym_env import make_gym_envs
         return make_gym_envs(cfg)

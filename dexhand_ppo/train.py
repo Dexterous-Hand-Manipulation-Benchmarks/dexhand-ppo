@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from dexhand_ppo.checkpoint import load_checkpoint, save_checkpoint
+from dexhand_ppo.checkpoint import CHECKPOINT_DIRNAME, load_checkpoint, save_checkpoint
 from dexhand_ppo.config import register_configs
 from dexhand_ppo.envs import make_envs
 from dexhand_ppo.metrics import MetricLogger
@@ -52,6 +52,8 @@ def train(cfg) -> dict:
     # sampling), which would give every run seed the same initial weights and sampling stream.
     seed_everything(cfg.seed)
     iterations = num_iterations(cfg)
+    if hasattr(train_env, "save_run_spec"):
+        train_env.save_run_spec(run_dir / CHECKPOINT_DIRNAME)
     env_description = train_env.describe() if hasattr(train_env, "describe") else {}
     provenance = write_provenance(str(run_dir), resolved, extra={
         "env": env_description,
@@ -82,7 +84,7 @@ def train(cfg) -> dict:
         print(f"[INFO] resumed from {cfg.checkpoint.resume} at iteration {start_iteration}")
 
     def save(name: str, iteration: int) -> None:
-        save_checkpoint(run_dir / "checkpoints" / name, model=model, optimizer=algo.optimizer, obs_norm=obs_norm,
+        save_checkpoint(run_dir / CHECKPOINT_DIRNAME / name, model=model, optimizer=algo.optimizer, obs_norm=obs_norm,
                         value_norm=value_norm, iteration=iteration, global_step=global_step,
                         learning_rate=algo.learning_rate, num_updates=algo.num_updates,
                         env_state=train_env.state_dict() if hasattr(train_env, "state_dict") else {},
@@ -94,7 +96,7 @@ def train(cfg) -> dict:
 
     def run_eval() -> dict:
         model.eval()
-        metrics = evaluator.evaluate(deterministic_policy)
+        metrics = evaluator.evaluate(deterministic_policy, global_step)
         model.train()
         return metrics
 

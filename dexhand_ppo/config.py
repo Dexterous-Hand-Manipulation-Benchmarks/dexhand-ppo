@@ -57,13 +57,10 @@ class GymEnvConfig:
 
 @dataclass
 class DexMachinaEnvConfig:
+    # What a run may choose of dexmachina's benchmark task; every other env setting is fixed there
+    # (dexmachina.envs.benchmark_task). benchmark_spec refuses a clip that is not one of its benchmark clips.
     hand: str = "allegro_hand"
     clip: str = "box-30-230"
-    # Full dexmachina argument list of the benchmark protocol (lab report Table VI). Set in env/dexmachina.yaml.
-    args: list[str] = field(default_factory=list)
-    curriculum_max_epochs: int = 10_000  # Emax of the normalised progress counter
-    rand_init_ratio: float = 0.02        # share of episodes starting at a random demo frame
-    num_eval_envs: int = 16              # plus one dummy env that dexmachina adds in is_eval mode (excluded)
 
 
 @dataclass
